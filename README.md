@@ -3,12 +3,9 @@
 AppleHomePodDiag is a Windows PowerShell diagnostic tool for troubleshooting
 Apple HomePod, AirPlay and Bonjour/mDNS connectivity.
 
-It was created to help diagnose situations where HomePods are visible or usable
-only from certain Wi-Fi bands, access points or network paths.
-
-The tool is especially useful in Wi-Fi environments with multiple access points,
-2.4 GHz / 5 GHz / 6 GHz networks, multicast filtering, IGMP snooping or other
-network infrastructure that may affect Bonjour/mDNS traffic.
+It is designed for cases where HomePods work only from certain Wi-Fi bands,
+access points or network paths, while normal network connectivity appears to
+work correctly.
 
 This tool has been created with the help of chatgpt.
 
@@ -19,25 +16,26 @@ https://github.com/Skittel/AppleHomePodDiag
 
 ## Why this project exists
 
-Apple HomePod connectivity issues can be difficult to troubleshoot.
+HomePod connectivity problems can be difficult to diagnose.
 
-A network may appear to work normally:
+A network may appear healthy:
 
 - Internet access works
 - Wi-Fi coverage is good
 - clients receive valid IP addresses
 - normal IP communication works
-- HomePods are associated with the Wi-Fi network
+- HomePods are connected to Wi-Fi
 
 while Apple Home, AirPlay or HomePod setup still fails.
 
-One possible cause is Bonjour/mDNS traffic not being transported correctly
+One possible cause is that Bonjour/mDNS traffic is not transported correctly
 between:
 
-- different Wi-Fi bands
+- 2.4 GHz and 5 GHz
 - different access points
 - different switches
 - different network segments
+- WLAN clients with isolation or multicast restrictions
 
 AppleHomePodDiag provides a reproducible way to test the network independently
 of the Apple Home app.
@@ -47,20 +45,23 @@ of the Apple Home app.
 
 AppleHomePodDiag can:
 
-- Discover AirPlay devices using Bonjour / mDNS
-- Browse `_airplay._tcp.local`
-- Detect Apple HomePods from their AirPlay service records
-- Identify known HomePod generations
-- Read HomePod software version information
-- Read AirPlay TXT records
-- Resolve `.local` hostnames through mDNS
-- Determine IPv4 addresses
-- Determine Layer-2 MAC addresses using the Windows neighbor / ARP table
-- Test ICMP/ping connectivity
-- Measure ping response time
-- Test the advertised AirPlay TCP port
-- Record the current Wi-Fi connection of the Windows test computer
-- Record:
+- discover AirPlay devices using Bonjour / mDNS
+- browse `_airplay._tcp.local`
+- identify Apple HomePods from their AirPlay service records
+- identify known HomePod generations
+- read Bonjour TXT records such as:
+  - `model`
+  - `osvers`
+  - `srcvers`
+  - `deviceid`
+  - `btaddr`
+- resolve `.local` hostnames through mDNS
+- determine IPv4 addresses
+- determine Layer-2 MAC addresses through the Windows neighbor / ARP table
+- test ICMP/ping connectivity
+- measure ping response time
+- test the AirPlay TCP port advertised by the device
+- record the current Wi-Fi connection of the Windows test computer:
   - SSID
   - BSSID
   - Wi-Fi band
@@ -68,24 +69,31 @@ AppleHomePodDiag can:
   - radio type
   - signal strength
   - local IPv4 address
-- Optionally check the installed HomePod software version against Apple's
-  public support information
-- Export scan results as:
+- optionally compare the installed HomePod software version with Apple's public
+  HomePod software information
+- export scan results as:
   - JSON
   - CSV
   - HTML
-- Compare results from multiple Windows test nodes
+- compare scans from multiple Windows test nodes
+- use a previous scan as a reference to test known HomePod IP addresses even
+  when Bonjour discovery fails on the current test node
+- run a focused diagnostic for a single device by:
+  - Bonjour/AirPlay name
+  - IPv4 address
+  - MAC address
 
 
-## Typical diagnostic scenario
+## Recommended test setup
 
-A useful troubleshooting setup consists of three Windows devices:
+For complex WLAN troubleshooting, a useful setup consists of three Windows
+devices:
 
 1. Management computer
 2. Test node connected to 2.4 GHz / Access Point 1
 3. Test node connected to 5 GHz / Access Point 2
 
-For example:
+Example:
 
 ```text
 Windows Test Node A
@@ -101,26 +109,10 @@ Access Point 2
 Windows Test Node B
 ```
 
-AppleHomePodDiag can be run on both test nodes.
+Run AppleHomePodDiag on both test nodes.
 
-The resulting scan files can then be compared to determine whether both
-network paths can discover and communicate with the same HomePods.
-
-
-## What this can help diagnose
-
-The tool may help distinguish between:
-
-- general IP connectivity problems
-- Wi-Fi client isolation
-- multicast problems
-- mDNS / Bonjour problems
-- communication problems between access points
-- communication problems between Wi-Fi bands
-- switch multicast handling problems
-- IGMP snooping related problems
-- AirPlay service reachability problems
-- Apple/HomePod-specific behavior
+This makes it possible to determine whether both network paths can discover and
+communicate with the same HomePods.
 
 
 ## Requirements
@@ -138,35 +130,25 @@ The script searches common Bonjour installation paths and also checks whether
 AppleHomePodDiag uses Apple's `dns-sd.exe` utility for Bonjour / DNS-SD service
 discovery.
 
-After Bonjour has been installed, you can verify that `dns-sd.exe` is
-available with:
+After Bonjour has been installed, verify that `dns-sd.exe` is available:
 
 ```cmd
 where dns-sd
 ```
 
-You can also test Bonjour manually:
+A manual AirPlay discovery test can be performed with:
 
 ```cmd
 dns-sd -B _airplay._tcp local
 ```
 
-A working network may return entries similar to:
-
-```text
-Galerie
-Kitchen
-Living Room
-Bedroom
-```
-
-To inspect a single AirPlay device manually:
+To inspect a single AirPlay device:
 
 ```cmd
-dns-sd -L "Galerie" _airplay._tcp local
+dns-sd -L "Living Room" _airplay._tcp local
 ```
 
-A HomePod may return TXT records similar to:
+A HomePod may return records similar to:
 
 ```text
 model=AudioAccessory1,1
@@ -186,14 +168,17 @@ Open PowerShell in the directory containing the script:
 .\AppleHomePodDiag.ps1
 ```
 
-The tool automatically performs a Bonjour/AirPlay scan and creates diagnostic
-reports.
+The tool performs a Bonjour/AirPlay scan and writes its reports to:
+
+```text
+HomePodDiag-Results
+```
 
 
 ## Name a test node
 
-When testing multiple network paths, give every Windows computer a descriptive
-name:
+When testing multiple network paths, give each Windows test computer a
+descriptive name:
 
 ```powershell
 .\AppleHomePodDiag.ps1 -NodeName "AP1-24GHz"
@@ -205,10 +190,8 @@ On another computer:
 .\AppleHomePodDiag.ps1 -NodeName "AP2-5GHz"
 ```
 
-The node name is stored in the report and makes later comparisons easier.
 
-
-## Change scan duration
+## Change the discovery time
 
 The default Bonjour discovery period can be changed:
 
@@ -216,11 +199,10 @@ The default Bonjour discovery period can be changed:
 .\AppleHomePodDiag.ps1 -ScanSeconds 10
 ```
 
-Longer scans may be useful when devices advertise their services less
-frequently.
+Longer scans may help if devices advertise services less frequently.
 
 
-## Scan only HomePods
+## Show only HomePods
 
 To hide other AirPlay-capable devices such as televisions or Apple TVs:
 
@@ -229,12 +211,81 @@ To hide other AirPlay-capable devices such as televisions or Apple TVs:
 ```
 
 
+## Focused device diagnostics
+
+Version 1.1.0 adds a focused diagnostic mode for a single device.
+
+Use exactly one of the following selectors:
+
+### By Bonjour / AirPlay name
+
+```powershell
+.\AppleHomePodDiag.ps1 -Name "Küche"
+```
+
+### By IPv4 address
+
+```powershell
+.\AppleHomePodDiag.ps1 -IP "192.168.2.67"
+```
+
+### By MAC address
+
+```powershell
+.\AppleHomePodDiag.ps1 -MAC "50-BC-96-03-A8-54"
+```
+
+Colon-separated MAC addresses are also accepted:
+
+```powershell
+.\AppleHomePodDiag.ps1 -MAC "50:BC:96:03:A8:54"
+```
+
+In focused mode, AppleHomePodDiag performs the same diagnostic checks for the
+selected device and prints additional details, including:
+
+- Bonjour/AirPlay name
+- device type
+- model identifier
+- `.local` hostname
+- IPv4 address
+- Layer-2 MAC address
+- AirPlay `deviceid`
+- Bluetooth address advertised through AirPlay
+- installed HomePod software version
+- detected public HomePod software version
+- firmware status
+- AirPlay software version
+- AirPlay TCP port
+- mDNS discovery status
+- `.local` resolution status
+- ping result and latency
+- TCP reachability
+- DNS-SD interface index
+- complete Bonjour TXT records
+
+For `-IP` and `-MAC`, the script still performs a Bonjour snapshot so that the
+network address can be correlated with device name, model and software version.
+
+If the device is reachable by IP but is not visible through Bonjour, the tool
+can still show a useful result such as:
+
+```text
+mDNS discovered : False
+Ping             : True
+TCP 7000         : True
+```
+
+This strongly suggests a Bonjour/mDNS or multicast discovery problem rather
+than a general IP connectivity problem.
+
+
 ## Skip the online HomePod version check
 
-By default the tool can attempt to determine the current HomePod software
-version from Apple's public support website.
+The script can try to determine the latest public HomePod software version from
+Apple's support website.
 
-To disable this:
+To disable this check:
 
 ```powershell
 .\AppleHomePodDiag.ps1 -SkipOnlineVersionCheck
@@ -243,85 +294,72 @@ To disable this:
 
 ## Specify an expected HomePod version manually
 
-For controlled or offline testing environments:
+For controlled or offline testing:
 
 ```powershell
 .\AppleHomePodDiag.ps1 -ExpectedHomePodVersion "26.6"
 ```
 
-This can also be useful if Apple's support website changes and automatic
-version detection temporarily stops working.
+This is also useful if Apple changes the structure of its public support page.
 
 
-## Output files
+## Reference scan mode
 
-By default the tool creates a directory named:
+This is one of the most useful features for troubleshooting mDNS problems.
 
-```text
-HomePodDiag-Results
-```
-
-Each scan produces:
-
-```text
-JSON
-CSV
-HTML
-```
-
-Example:
-
-```text
-HomePodDiag-AP1-24GHz-20261006-120000.json
-HomePodDiag-AP1-24GHz-20261006-120000.csv
-HomePodDiag-AP1-24GHz-20261006-120000.html
-```
-
-The JSON file contains the complete machine-readable scan information and can
-be used for comparisons.
-
-
-## Compare two scans
-
-Run a scan on Test Node A:
+First run a scan from one network path:
 
 ```powershell
 .\AppleHomePodDiag.ps1 -NodeName "AP1-24GHz"
 ```
 
-Run another scan on Test Node B:
+Then copy the generated JSON report to another test node and run:
 
 ```powershell
-.\AppleHomePodDiag.ps1 -NodeName "AP2-5GHz"
+.\AppleHomePodDiag.ps1 `
+    -NodeName "AP2-5GHz" `
+    -ReferenceJson ".\AppleHomePodDiag-AP1-24GHz-20261006-120000.json"
 ```
 
-Copy both JSON files to one computer and compare them:
+If a HomePod is not discovered by Bonjour on the second node, the script can
+still use the known IP address from the reference report and test:
+
+- ping
+- Layer-2 neighbor / ARP information
+- the advertised AirPlay TCP port
+
+This can produce an important diagnostic result such as:
+
+```text
+HomePod: Galerie
+
+mDNS discovery : NO
+IP              : 192.168.2.73
+Ping            : OK
+AirPlay TCP     : OK
+```
+
+That strongly suggests a Bonjour/mDNS or multicast discovery problem rather
+than a general IP connectivity problem.
+
+
+## Compare scan reports
+
+Two or more JSON reports can be compared:
 
 ```powershell
 .\AppleHomePodDiag.ps1 -Compare `
-    ".\HomePodDiag-AP1-24GHz-20261006-120000.json", `
-    ".\HomePodDiag-AP2-5GHz-20261006-120500.json"
+    ".\AP1.json", `
+    ".\AP2.json"
 ```
 
-The comparison can reveal situations such as:
-
-```text
-HomePod "Galerie"
-
-                         AP1 / 2.4 GHz   AP2 / 5 GHz
-mDNS discovery           YES             NO
-IPv4 address             available       -
-Ping                     OK              -
-AirPlay TCP              OK              -
-```
-
-This is a strong indication that Bonjour/mDNS traffic is not reaching both
-network paths correctly.
+The comparison can highlight devices that are visible on one Wi-Fi path but
+missing on another.
 
 
-## Example of a healthy comparison
+## Example diagnostic result
 
-A healthy network might show:
+A healthy network path may look like this:
 
 ```text
                          AP1 / 2.4 GHz   AP2 / 5 GHz
@@ -331,28 +369,59 @@ Ping                     OK              OK
 AirPlay TCP              OK              OK
 ```
 
-This suggests that the basic network path and Bonjour discovery work from both
-test locations.
+A possible multicast/mDNS problem may look like this:
+
+```text
+                         AP1 / 2.4 GHz   AP2 / 5 GHz
+mDNS discovery           YES             NO
+Known IP connectivity    OK              OK
+Ping                     OK              OK
+AirPlay TCP              OK              OK
+```
+
+In the second example, normal IP communication works but Bonjour discovery does
+not reach both clients.
+
+
+## Output files
+
+Each scan creates:
+
+- JSON
+- CSV
+- HTML
+
+Example:
+
+```text
+AppleHomePodDiag-AP1-24GHz-20261006-120000.json
+AppleHomePodDiag-AP1-24GHz-20261006-120000.csv
+AppleHomePodDiag-AP1-24GHz-20261006-120000.html
+```
+
+The JSON file contains the complete machine-readable scan data and is used for
+reference scans and comparisons.
 
 
 ## HomePod identification
 
-Apple HomePods advertise a model identifier through their AirPlay Bonjour TXT
-record.
+HomePods advertise a model identifier through their AirPlay Bonjour TXT
+records.
 
-Currently recognized identifiers include:
+Known identifiers currently handled by the script include:
 
 | Model identifier | Device |
 |---|---|
 | `AudioAccessory1,1` | HomePod (1st generation) |
+| `AudioAccessory1,2` | HomePod (1st generation variant) |
 | `AudioAccessory5,1` | HomePod mini |
+| `AudioAccessorySingle5,1` | HomePod mini |
 | `AudioAccessory6,1` | HomePod (2nd generation) |
 
-Unknown AirPlay devices are still displayed but may not receive a specific
-product name.
+Unknown `AudioAccessory...` identifiers are still treated as HomePods and are
+shown as unknown HomePod models.
 
-Future Apple hardware may require new model identifiers to be added to the
-script.
+Future Apple hardware may require new model mappings.
 
 
 ## HomePod software version
@@ -367,92 +436,58 @@ osvers=26.6
 srcvers=960.13.1
 ```
 
-The important values are:
+Important values:
 
-```text
-model
-```
+- `model` = Apple hardware model identifier
+- `osvers` = installed HomePod software version
+- `srcvers` = AirPlay software component version
 
-Apple hardware model identifier.
-
-```text
-osvers
-```
-
-Installed HomePod software version.
-
-```text
-srcvers
-```
-
-AirPlay software component version.
-
-`srcvers` should not be confused with the installed HomePod operating system
-version.
+`srcvers` should not be confused with the installed HomePod software version.
 
 
-## Firmware update check
+## Firmware version check
 
-AppleHomePodDiag can optionally compare the installed `osvers` value with
-information retrieved from Apple's public support website.
+AppleHomePodDiag can optionally compare the installed `osvers` value with the
+latest HomePod software version it can detect on Apple's public support page.
 
 Possible states include:
 
 ```text
-AKTUELL
-UPDATE
-NICHT GEPRUEFT
-UNBEKANNT
+CURRENT
+UPDATE AVAILABLE
+NOT CHECKED
+UNKNOWN
+NEWER THAN PUBLIC
 ```
 
 The online version check is best-effort.
 
 Apple may change the structure of its public support website at any time. If
-automatic detection fails, the installed HomePod version is still shown and
-the expected version can be specified manually.
+automatic detection fails, the installed HomePod software version is still
+shown and the expected version can be specified manually.
 
 
-## Network information collected
+## Wi-Fi information recorded
 
-For the Windows test computer, the tool records information including:
+For the Windows test computer, the tool records:
 
-```text
-SSID
-BSSID
-Wi-Fi band
-channel
-radio type
-signal strength
-IPv4 address
-```
+- interface
+- connection state
+- SSID
+- BSSID
+- Wi-Fi band
+- channel
+- radio type
+- signal strength
+- IPv4 address
 
 The BSSID is particularly useful because it identifies the specific access
-point radio to which the Windows computer is currently connected.
-
-This makes it possible to document a test such as:
-
-```text
-Test Node A
-SSID: Office
-Band: 2.4 GHz
-Channel: 6
-BSSID: AA:BB:CC:DD:EE:01
-```
-
-and compare it with:
-
-```text
-Test Node B
-SSID: Office
-Band: 5 GHz
-Channel: 44
-BSSID: AA:BB:CC:DD:EE:02
-```
+point radio to which the test computer is associated.
 
 
-## Device information collected
+## Device information recorded
 
-For discovered AirPlay devices, AppleHomePodDiag may collect:
+For discovered AirPlay devices, the tool may record:
 
 - Bonjour instance name
 - detected device type
@@ -465,18 +500,21 @@ For discovered AirPlay devices, AppleHomePodDiag may collect:
 - HomePod software version
 - AirPlay software version
 - advertised AirPlay TCP port
+- mDNS discovery status
+- `.local` resolution status
 - ping result
 - ping latency
 - TCP port reachability
 - DNS-SD interface index
+- Bonjour TXT records
 
 
 ## MAC addresses
 
-The MAC address shown by AppleHomePodDiag is obtained through the local Windows
-neighbor / ARP table after IP communication with the device.
+The Layer-2 MAC address shown by AppleHomePodDiag is obtained through the local
+Windows neighbor / ARP table after IP communication with the device.
 
-This is useful when matching a HomePod to a Wi-Fi controller such as:
+This can help match a HomePod to a WLAN controller such as:
 
 - TP-Link Omada
 - UniFi
@@ -484,13 +522,13 @@ This is useful when matching a HomePod to a Wi-Fi controller such as:
 - Cisco
 - other WLAN management systems
 
-The MAC address advertised as an AirPlay `deviceid` may not necessarily be the
-same address shown by the WLAN infrastructure.
+The MAC address advertised as the AirPlay `deviceid` is not assumed to be the
+same address used by the WLAN infrastructure.
 
 
 ## Network traffic generated
 
-AppleHomePodDiag does not modify the network configuration.
+AppleHomePodDiag does not modify network configuration.
 
 It performs diagnostic operations including:
 
@@ -514,30 +552,26 @@ AppleHomePodDiag does not require or collect:
 - Wi-Fi passwords
 - Apple Home credentials
 
-The tool operates using information already available on the local network
-through Bonjour/mDNS and normal IP networking.
+The tool operates using information already exposed on the local network
+through Bonjour/mDNS and standard IP networking.
 
 
-## Important limitation: Bonjour visibility
+## Limitations
 
-Bonjour/mDNS is intentionally local-network oriented.
+### Bonjour visibility
+
+Bonjour/mDNS is local-network oriented.
 
 A HomePod that does not advertise its AirPlay service to a particular test
-computer may not appear in the scan even if:
+computer may not appear in a normal scan even if direct IP connectivity would
+otherwise work.
 
-- the HomePod is powered on
-- it has an IP address
-- direct IP communication might otherwise work
-
-This is not necessarily a limitation of the tool.
-
-In fact, a device being visible from one Wi-Fi path but missing from another
-can itself be an important diagnostic result.
+This is one reason the `-ReferenceJson` and focused diagnostic options exist.
 
 
-## Important limitation: missing devices
+### Missing physical devices
 
-AppleHomePodDiag discovers devices that are visible through the network.
+AppleHomePodDiag discovers network-visible devices.
 
 It cannot determine how many HomePods physically exist in a building.
 
@@ -548,24 +582,21 @@ Physical HomePods: 12
 Discovered HomePods: 10
 ```
 
-The tool can show the 10 network-visible devices, but it cannot automatically
-identify the two physically present devices that are completely disconnected
-from the network.
-
-Physical inventory information such as room name and serial number may still
-be required in such cases.
+The tool can show the 10 visible devices, but it cannot automatically identify
+the two physically present devices that are completely disconnected from the
+network.
 
 
-## Important limitation: serial numbers
+### Serial numbers
 
-HomePod serial numbers are not normally included in the AirPlay Bonjour TXT
+HomePod serial numbers are not normally present in the AirPlay Bonjour TXT
 records used by this tool.
 
-A physical HomePod can therefore not always be matched directly to a network
-entry using its serial number alone.
+A physical HomePod therefore cannot always be matched directly to a network
+entry using only its serial number.
 
 
-## Important limitation: Apple Home
+### Apple Home / HomeKit behavior
 
 AppleHomePodDiag tests network behavior.
 
@@ -578,50 +609,38 @@ It does not reproduce every internal function of:
 - HomePod setup
 - iCloud
 
-A successful AppleHomePodDiag test therefore demonstrates that basic network,
-Bonjour and AirPlay connectivity works, but it does not guarantee that every
-Apple Home feature will work correctly.
+A successful scan therefore demonstrates that basic network, Bonjour and
+AirPlay connectivity works, but it does not guarantee that every Apple Home
+feature will work correctly.
 
 
 ## Recommended troubleshooting methodology
 
-When troubleshooting complex WLAN environments, change only one variable at a
-time.
+Change only one variable at a time.
 
-A useful test sequence is:
+A useful sequence is:
 
 1. Verify that the HomePod is visible through Bonjour.
 2. Verify `.local` name resolution.
 3. Verify IP connectivity.
 4. Verify the advertised AirPlay TCP port.
-5. Repeat the test from the same access point but another Wi-Fi band.
+5. Repeat the test from the same access point on another Wi-Fi band.
 6. Repeat the test from another access point.
-7. Compare the resulting JSON reports.
-8. Only then change WLAN configuration such as:
-   - IGMP snooping
-   - multicast filtering
-   - client isolation
-   - WPA2/WPA3 transition mode
-   - band steering
-   - roaming options
-
-
-## Example troubleshooting matrix
-
-| Test node | Wi-Fi band | Access point | Bonjour | Ping | AirPlay TCP |
-|---|---:|---|---|---|---|
-| Node A | 2.4 GHz | AP1 | OK | OK | OK |
-| Node B | 5 GHz | AP1 | OK | OK | OK |
-| Node C | 2.4 GHz | AP2 | OK | OK | OK |
-| Node D | 5 GHz | AP2 | FAIL | - | - |
-
-Such a result may indicate a band-specific or access-point-specific multicast
-problem.
+7. Use a reference scan to test IP connectivity to devices missing from mDNS.
+8. Compare the JSON reports.
+9. Use focused diagnostics for individual devices when needed.
+10. Only then change WLAN configuration such as:
+    - IGMP snooping
+    - multicast filtering
+    - client isolation
+    - WPA2/WPA3 transition mode
+    - band steering
+    - roaming options
 
 
 ## Safety
 
-The script is designed as a read-only diagnostic tool.
+The script is intended to be a read-only diagnostic tool.
 
 It does not intentionally:
 
@@ -636,23 +655,21 @@ It does not intentionally:
 
 ## PowerShell execution policy
 
-Depending on the Windows PowerShell configuration, Windows may prevent locally
-downloaded PowerShell scripts from running.
+Windows may block downloaded PowerShell scripts.
 
-You can inspect the current policy with:
+Check the current policy with:
 
 ```powershell
 Get-ExecutionPolicy
 ```
 
-If a downloaded script is blocked, you can also inspect or unblock the specific
-file:
+If the downloaded script is blocked, inspect and unblock that specific file:
 
 ```powershell
 Unblock-File .\AppleHomePodDiag.ps1
 ```
 
-Always review scripts before running them with administrative privileges.
+Always review scripts before running them.
 
 
 ## Administrative privileges
@@ -660,54 +677,40 @@ Always review scripts before running them with administrative privileges.
 Most diagnostic functions should work without running PowerShell as
 Administrator.
 
-Depending on the local Windows configuration, some network information may be
-more complete when PowerShell is started with appropriate permissions.
+Depending on local Windows configuration, some network information may be more
+complete when PowerShell is started with appropriate permissions.
 
 
 ## Contributing
 
 Bug reports, test results and pull requests are welcome.
 
-If you discover:
+Useful contributions include:
 
-- a new HomePod model identifier
-- different Bonjour TXT records
-- compatibility problems
-- incorrect model detection
-- issues with Windows Wi-Fi detection
-- problems in multi-AP environments
-
-please open an issue or submit a pull request.
+- new HomePod model identifiers
+- additional Bonjour TXT record examples
+- Windows compatibility fixes
+- Wi-Fi band detection improvements
+- test results from multi-AP environments
+- additional comparison and reporting features
 
 Repository:
 
 https://github.com/Skittel/AppleHomePodDiag
 
 
-## Redistribution and modified versions
+## License
 
-This project may be:
+AppleHomePodDiag may be used, modified, redistributed and used commercially
+subject to the conditions in the `LICENSE` file.
 
-- used privately
-- used commercially
-- copied
-- modified
-- redistributed
-
-Modified and redistributed versions must retain the project information
-required by the license.
+Redistributions and modified versions must retain the project information
+required by the license, including `PROJECT_INFO.txt`.
 
 See:
 
-```text
-PROJECT_INFO.txt
-```
-
-and:
-
-```text
-LICENSE
-```
+- `LICENSE`
+- `PROJECT_INFO.txt`
 
 
 ## Original project
@@ -719,20 +722,6 @@ https://github.com/Skittel/AppleHomePodDiag
 Original author:
 
 Stefan Kittel
-
-
-## License
-
-AppleHomePodDiag is distributed under the license included in the `LICENSE`
-file.
-
-The software may be used, modified, redistributed and used commercially,
-subject to the conditions defined there.
-
-Redistributions must retain the attribution information contained in
-`PROJECT_INFO.txt`.
-
-See [LICENSE](LICENSE) for the complete license terms.
 
 
 ## Disclaimer
