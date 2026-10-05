@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Stefan Kittel <info@kittel.online> - https://github.com/Skittel/AppleHomePodDiag
 #requires -Version 5.1
 <#
 .SYNOPSIS
@@ -68,7 +69,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $Script:ToolName = 'AppleHomePodDiag'
-$Script:ToolVersion = '1.0.0'
+$Script:ToolVersion = '1.0.2'
 $Script:ProjectUrl = 'https://github.com/Skittel/AppleHomePodDiag'
 $Script:AppleUpdateUrl = 'https://support.apple.com/en-us/108045'
 
@@ -148,16 +149,22 @@ function Invoke-CapturedProcess {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
 
-    # Apple dns-sd output is UTF-8. Without this, umlauts can appear corrupted.
     try { $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
-    try { $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8 } catch {}
+    try { $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8 } catch {}
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
 
     [void]$process.Start()
 
+    # Read both redirected streams asynchronously while dns-sd is running.
+    # This is important for "dns-sd -Z", which can emit enough TXT records to
+    # fill the Windows pipe buffer and otherwise block before the timeout.
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
     $timer = [Diagnostics.Stopwatch]::StartNew()
+
     while (-not $process.HasExited -and $timer.ElapsedMilliseconds -lt $TimeoutMs) {
         Start-Sleep -Milliseconds 40
     }
@@ -170,8 +177,9 @@ function Invoke-CapturedProcess {
 
     $stdout = ''
     $stderr = ''
-    try { $stdout = $process.StandardOutput.ReadToEnd() } catch {}
-    try { $stderr = $process.StandardError.ReadToEnd() } catch {}
+
+    try { $stdout = $stdoutTask.Result } catch {}
+    try { $stderr = $stderrTask.Result } catch {}
 
     $timer.Stop()
 
@@ -474,8 +482,176 @@ function Get-AirPlayInstances {
         }
     }
 
-    return @($names)
+    return $names.ToArray()
 }
+
+
+function ConvertFrom-DnsSdZoneName {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $Text
+    }
+
+    # dns-sd -Z leaves Unicode characters such as ä/ü intact on Windows but
+    # escapes characters such as spaces as decimal DNS escapes, e.g. \032.
+    # PowerShell strings are already Unicode, so decode only the DNS escapes.
+    $result = [regex]::Replace(
+        $Text,
+        '\\(?<n>\d{3})',
+        [System.Text.RegularExpressions.MatchEvaluator]{
+            param($m)
+            $value = [int]$m.Groups['n'].Value
+            return [char]$value
+        }
+    )
+
+    # Decode a simple escaped character as well (for example "\." if present).
+    $result = [regex]::Replace(
+        $result,
+        '\\(?<c>.)',
+        [System.Text.RegularExpressions.MatchEvaluator]{
+            param($m)
+            return $m.Groups['c'].Value
+        }
+    )
+
+    return $result
+}
+
+function Get-AirPlayInstanceFromZoneOwner {
+    param([AllowNull()][string]$Owner)
+
+    if ([string]::IsNullOrWhiteSpace($Owner)) {
+        return $null
+    }
+
+    $value = $Owner.Trim().TrimEnd('.')
+
+    foreach ($suffix in @(
+        '._airplay._tcp.local',
+        '._airplay._tcp'
+    )) {
+        if ($value.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
+            $value = $value.Substring(0, $value.Length - $suffix.Length)
+            break
+        }
+    }
+
+    if ($value -eq '_airplay._tcp' -or $value -eq '_airplay._tcp.local') {
+        return $null
+    }
+
+    return (ConvertFrom-DnsSdZoneName $value)
+}
+
+function Get-AirPlayZoneDetails {
+    param(
+        [Parameter(Mandatory = $true)][string]$DnsSd,
+        [Parameter(Mandatory = $true)][int]$Seconds
+    )
+
+    # -Z is the Unicode-safe path on Windows. The instance name never has to
+    # be supplied back to dns-sd.exe as an argument, so names such as "Küche",
+    # "Gäste WC" and "Joni‘s Zimmer" can be handled correctly.
+    $result = Invoke-CapturedProcess `
+        -FilePath $DnsSd `
+        -Arguments '-Z _airplay._tcp local' `
+        -TimeoutMs ($Seconds * 1000)
+
+    $records = @{}
+
+    function Get-OrCreateZoneRecord {
+        param([Parameter(Mandatory = $true)][string]$Name)
+
+        if (-not $records.ContainsKey($Name)) {
+            $records[$Name] = [pscustomobject]@{
+                InstanceName   = $Name
+                HostName       = $null
+                Port           = $null
+                InterfaceIndex = $null
+                TXT            = [ordered]@{}
+                Raw            = ''
+            }
+        }
+
+        return $records[$Name]
+    }
+
+    foreach ($line in ($result.StdOut -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        # Observed Windows format:
+        # _airplay._tcp PTR Küche._airplay._tcp
+        # Küche._airplay._tcp SRV 0 0 7000 Kuche.local. ; comment
+        # Küche._airplay._tcp TXT "acl=0" ... "model=AudioAccessory1,1"
+        $rr = [regex]::Match(
+            $line,
+            '^\s*(?<owner>\S+)\s+(?<type>PTR|SRV|TXT)\s+(?<data>.*)$'
+        )
+
+        if (-not $rr.Success) {
+            continue
+        }
+
+        $owner = $rr.Groups['owner'].Value
+        $type  = $rr.Groups['type'].Value
+        $data  = $rr.Groups['data'].Value
+
+        if ($type -eq 'PTR') {
+            $ptrTarget = ($data -split '\s+')[0]
+            $name = Get-AirPlayInstanceFromZoneOwner $ptrTarget
+
+            if ($name) {
+                [void](Get-OrCreateZoneRecord $name)
+            }
+
+            continue
+        }
+
+        $name = Get-AirPlayInstanceFromZoneOwner $owner
+        if (-not $name) {
+            continue
+        }
+
+        $record = Get-OrCreateZoneRecord $name
+        $record.Raw += $line + "`r`n"
+
+        if ($type -eq 'SRV') {
+            # Remove dns-sd's explanatory comment after the target hostname.
+            $srvData = ($data -split '\s+;\s+', 2)[0]
+
+            $srv = [regex]::Match(
+                $srvData,
+                '^\s*\d+\s+\d+\s+(?<port>\d+)\s+(?<host>\S+)\s*$'
+            )
+
+            if ($srv.Success) {
+                $record.Port = [int]$srv.Groups['port'].Value
+                $record.HostName = ConvertFrom-DnsSdZoneName(
+                    $srv.Groups['host'].Value.Trim().TrimEnd('.')
+                )
+            }
+
+            continue
+        }
+
+        if ($type -eq 'TXT') {
+            foreach ($quoted in [regex]::Matches($data, '"(?<txt>(?:\\.|[^"])*)"')) {
+                $value = ConvertFrom-DnsSdZoneName $quoted.Groups['txt'].Value
+
+                if ($value -match '^(?<key>[^=]+)=(?<val>.*)$') {
+                    $record.TXT[$matches['key']] = $matches['val']
+                }
+            }
+        }
+    }
+
+    return $records
+}
+
 
 function Get-AirPlayDetails {
     param(
@@ -542,6 +718,19 @@ function Resolve-MdnsIPv4 {
             return $match.Groups[1].Value
         }
     }
+
+    # Fallback to the Windows name resolver. This uses Unicode APIs and is
+    # therefore more reliable for .local hostnames containing non-ASCII chars.
+    try {
+        $address = [System.Net.Dns]::GetHostAddresses($HostName) |
+            Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+            Select-Object -First 1
+
+        if ($address) {
+            return $address.IPAddressToString
+        }
+    }
+    catch {}
 
     return $null
 }
@@ -807,7 +996,7 @@ function Convert-ToHtmlReport {
 
     Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
 
-    function H([AllowNull()][object]$Value) {
+    function ConvertTo-HtmlEncoded([AllowNull()][object]$Value) {
         if ($null -eq $Value) { return '' }
         return [System.Web.HttpUtility]::HtmlEncode([string]$Value)
     }
@@ -824,17 +1013,17 @@ function Convert-ToHtmlReport {
 
         @"
 <tr class="$class">
-<td>$(H $device.Name)</td>
-<td>$(H $device.Type)</td>
-<td>$(H $device.IPv4)</td>
-<td>$(H $device.MAC)</td>
-<td>$(H $device.OSVersion)</td>
-<td>$(H $device.VersionStatus)</td>
-<td>$(H $device.MdnsDiscovered)</td>
-<td>$(H $device.MdnsResolved)</td>
-<td>$(H $(if ($device.PingOK) { if ($null -ne $device.PingMs) { "$($device.PingMs) ms" } else { 'OK' } } else { 'FAIL' }))</td>
-<td>$(H $(if ($device.TcpOK) { "OK:$($device.Port)" } else { "FAIL:$($device.Port)" }))</td>
-<td>$(H $device.DiscoverySource)</td>
+<td>$(ConvertTo-HtmlEncoded $device.Name)</td>
+<td>$(ConvertTo-HtmlEncoded $device.Type)</td>
+<td>$(ConvertTo-HtmlEncoded $device.IPv4)</td>
+<td>$(ConvertTo-HtmlEncoded $device.MAC)</td>
+<td>$(ConvertTo-HtmlEncoded $device.OSVersion)</td>
+<td>$(ConvertTo-HtmlEncoded $device.VersionStatus)</td>
+<td>$(ConvertTo-HtmlEncoded $device.MdnsDiscovered)</td>
+<td>$(ConvertTo-HtmlEncoded $device.MdnsResolved)</td>
+<td>$(ConvertTo-HtmlEncoded $(if ($device.PingOK) { if ($null -ne $device.PingMs) { "$($device.PingMs) ms" } else { 'OK' } } else { 'FAIL' }))</td>
+<td>$(ConvertTo-HtmlEncoded $(if ($device.TcpOK) { "OK:$($device.Port)" } else { "FAIL:$($device.Port)" }))</td>
+<td>$(ConvertTo-HtmlEncoded $device.DiscoverySource)</td>
 </tr>
 "@
     }
@@ -844,7 +1033,7 @@ function Convert-ToHtmlReport {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AppleHomePodDiag - $(H $Metadata.NodeName)</title>
+<title>AppleHomePodDiag - $(ConvertTo-HtmlEncoded $Metadata.NodeName)</title>
 <style>
 body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#222}
 h1,h2{margin-bottom:.45em}
@@ -861,15 +1050,15 @@ code{background:#f4f4f4;padding:1px 4px}
 <body>
 <h1>AppleHomePodDiag</h1>
 <table>
-<tr><th>Scan time</th><td>$(H $Metadata.Timestamp)</td></tr>
-<tr><th>Node</th><td>$(H $Metadata.NodeName)</td></tr>
-<tr><th>Computer</th><td>$(H $Metadata.ComputerName)</td></tr>
-<tr><th>SSID</th><td>$(H $Metadata.WLAN.SSID)</td></tr>
-<tr><th>BSSID</th><td>$(H $Metadata.WLAN.BSSID)</td></tr>
-<tr><th>Band / Channel</th><td>$(H ("{0} / {1}" -f $Metadata.WLAN.Band, $Metadata.WLAN.Channel))</td></tr>
-<tr><th>Local IPv4</th><td>$(H $Metadata.WLAN.IPv4)</td></tr>
-<tr><th>Public HomePod version</th><td>$(H ("{0} ({1})" -f $Metadata.CurrentHomePodVersion, $Metadata.CurrentVersionSource))</td></tr>
-<tr><th>Reference report</th><td>$(H $Metadata.ReferenceJson)</td></tr>
+<tr><th>Scan time</th><td>$(ConvertTo-HtmlEncoded $Metadata.Timestamp)</td></tr>
+<tr><th>Node</th><td>$(ConvertTo-HtmlEncoded $Metadata.NodeName)</td></tr>
+<tr><th>Computer</th><td>$(ConvertTo-HtmlEncoded $Metadata.ComputerName)</td></tr>
+<tr><th>SSID</th><td>$(ConvertTo-HtmlEncoded $Metadata.WLAN.SSID)</td></tr>
+<tr><th>BSSID</th><td>$(ConvertTo-HtmlEncoded $Metadata.WLAN.BSSID)</td></tr>
+<tr><th>Band / Channel</th><td>$(ConvertTo-HtmlEncoded ("{0} / {1}" -f $Metadata.WLAN.Band, $Metadata.WLAN.Channel))</td></tr>
+<tr><th>Local IPv4</th><td>$(ConvertTo-HtmlEncoded $Metadata.WLAN.IPv4)</td></tr>
+<tr><th>Public HomePod version</th><td>$(ConvertTo-HtmlEncoded ("{0} ({1})" -f $Metadata.CurrentHomePodVersion, $Metadata.CurrentVersionSource))</td></tr>
+<tr><th>Reference report</th><td>$(ConvertTo-HtmlEncoded $Metadata.ReferenceJson)</td></tr>
 </table>
 
 <h2>AirPlay devices</h2>
@@ -1020,11 +1209,15 @@ if (-not (Test-Path -LiteralPath $OutputDirectory)) {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 }
 
-Write-Section "$Script:ToolName $Script:ToolVersion"
+Write-Host ''
+Write-Host ('=' * 86) -ForegroundColor DarkGray
+Write-Host (" {0} {1}" -f $Script:ToolName, $Script:ToolVersion) -ForegroundColor Cyan
+Write-Host " Copyright (c) 2026 Stefan Kittel <info@kittel.online>"
+Write-Host " Project: https://github.com/Skittel/AppleHomePodDiag"
+Write-Host ('=' * 86) -ForegroundColor DarkGray
 Write-Host "Node:            $NodeName"
 Write-Host "dns-sd.exe:      $dnsSd"
 Write-Host "Discovery time:  $ScanSeconds seconds"
-Write-Host "Project:         $Script:ProjectUrl"
 
 if ($ReferenceJson) {
     Write-Host "Reference JSON:  $ReferenceJson"
@@ -1057,6 +1250,15 @@ Write-Host 'Discovering AirPlay services...' -ForegroundColor Gray
 
 $instances = @(Get-AirPlayInstances -DnsSd $dnsSd -Seconds $ScanSeconds)
 
+# Capture the same services in zone-file form as well. Besides being more
+# efficient for TXT/SRV data, this avoids the Windows dns-sd.exe Unicode
+# command-line issue when an instance contains characters such as ä, ü or ‘.
+$zoneDetails = Get-AirPlayZoneDetails -DnsSd $dnsSd -Seconds $ScanSeconds
+
+if ($instances.Count -eq 0 -and $zoneDetails.Count -gt 0) {
+    $instances = @($zoneDetails.Keys)
+}
+
 if ($instances.Count -eq 0) {
     Write-Warning 'No _airplay._tcp services were discovered. This is itself an important diagnostic result.'
 }
@@ -1072,7 +1274,23 @@ foreach ($instance in $instances) {
         -Status ("{0}/{1}: {2}" -f $index, $instances.Count, $instance) `
         -PercentComplete (($index / [math]::Max(1, $instances.Count)) * 100)
 
-    $detail = Get-AirPlayDetails -DnsSd $dnsSd -InstanceName $instance
+    # Prefer complete -Z data. It is robust for Unicode instance names because
+    # the instance does not need to be passed back as a command-line argument.
+    $detail = $null
+
+    if ($zoneDetails.ContainsKey($instance)) {
+        $candidate = $zoneDetails[$instance]
+
+        if ($candidate.HostName -and $candidate.Port -and $candidate.TXT.Count -gt 0) {
+            $detail = $candidate
+        }
+    }
+
+    # Fallback for plain ASCII names if the -Z snapshot did not contain the
+    # complete SRV/TXT record. This also keeps devices such as NAD M10 working.
+    if ($null -eq $detail) {
+        $detail = Get-AirPlayDetails -DnsSd $dnsSd -InstanceName $instance
+    }
 
     $model = if ($detail.TXT.Contains('model')) { [string]$detail.TXT['model'] } else { $null }
     $isHomePod = Test-IsHomePodModel $model
@@ -1134,6 +1352,11 @@ if ($ReferenceJson) {
         -OnlyHomePods:$HomePodsOnly
 }
 
+# Convert the generic List to a real Object[] once. Windows PowerShell 5.1
+# can throw "Argument types do not match" when @($genericList) is used during
+# JSON/CSV/report generation.
+$deviceArray = $devices.ToArray()
+
 $metadata = [pscustomobject]@{
     Tool                  = $Script:ToolName
     ToolVersion           = $Script:ToolVersion
@@ -1155,7 +1378,7 @@ $metadata = [pscustomobject]@{
 Write-Section 'Results'
 
 $display = @(
-    $devices |
+    $deviceArray |
         Sort-Object @{ Expression = 'IsHomePod'; Descending = $true }, Name |
         Select-Object `
             Name,
@@ -1168,7 +1391,7 @@ $display = @(
             @{ Name = 'Ping'; Expression = {
                 if ($_.PingOK) {
                     if ($null -ne $_.PingMs) { "$($_.PingMs)ms" } else { 'OK' }
-                } else { 'FAIL' }
+                } else { 'NO REPLY' }
             }},
             @{ Name = 'TCP'; Expression = {
                 if ($_.TcpOK) { "OK:$($_.Port)" } else { "FAIL:$($_.Port)" }
@@ -1192,18 +1415,18 @@ $htmlPath = Join-Path $OutputDirectory ($baseName + '.html')
 
 $report = [pscustomobject]@{
     Metadata = $metadata
-    Devices  = @($devices)
+    Devices  = $deviceArray
 }
 
 $report |
     ConvertTo-Json -Depth 10 |
     Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
-@($devices) |
+$deviceArray |
     Export-Csv -LiteralPath $csvPath -Delimiter ';' -NoTypeInformation -Encoding UTF8
 
 try {
-    Convert-ToHtmlReport -Metadata $metadata -Devices @($devices) -Path $htmlPath
+    Convert-ToHtmlReport -Metadata $metadata -Devices $deviceArray -Path $htmlPath
 }
 catch {
     Write-Warning "HTML report could not be created: $($_.Exception.Message)"
@@ -1212,14 +1435,14 @@ catch {
 
 Write-Section 'Summary'
 
-$homePods = @($devices | Where-Object { $_.IsHomePod })
+$homePods = @($deviceArray | Where-Object { $_.IsHomePod })
 $updates = @($homePods | Where-Object { $_.VersionStatus -eq 'UPDATE AVAILABLE' })
-$notDiscovered = @($devices | Where-Object { -not $_.MdnsDiscovered })
-$resolvedFailures = @($devices | Where-Object { $_.MdnsDiscovered -and -not $_.MdnsResolved })
-$pingFailures = @($devices | Where-Object { $_.IPv4 -and -not $_.PingOK })
-$tcpFailures = @($devices | Where-Object { $_.IPv4 -and -not $_.TcpOK })
+$notDiscovered = @($deviceArray | Where-Object { -not $_.MdnsDiscovered })
+$resolvedFailures = @($deviceArray | Where-Object { $_.MdnsDiscovered -and -not $_.MdnsResolved })
+$pingFailures = @($deviceArray | Where-Object { $_.IPv4 -and -not $_.PingOK })
+$tcpFailures = @($deviceArray | Where-Object { $_.IPv4 -and -not $_.TcpOK })
 
-Write-Host ("AirPlay records/devices:      {0}" -f $devices.Count)
+Write-Host ("AirPlay records/devices:      {0}" -f $deviceArray.Count)
 Write-Host ("HomePods:                     {0}" -f $homePods.Count)
 Write-Host ("HomePods with update:         {0}" -f $updates.Count)
 Write-Host ("Missing from mDNS (reference):{0}" -f $notDiscovered.Count)
