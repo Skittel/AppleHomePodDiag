@@ -1,0 +1,13 @@
+AppleHomePodDiag
+
+Original project:
+https://github.com/Skittel/AppleHomePodDiag
+
+Original author:
+Stefan Kittel (stefan@kittel.online)
+
+AppleHomePodDiag is a Windows PowerShell diagnostic utility for troubleshooting
+Apple HomePod, AirPlay and Bonjour/mDNS connectivity.
+
+This file must remain included when this software is redistributed, including
+modified versions.
