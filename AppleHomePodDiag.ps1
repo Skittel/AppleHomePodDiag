@@ -33,6 +33,12 @@
 
     .\AppleHomePodDiag.ps1 -HomePodsOnly -ScanSeconds 8
 
+    .\AppleHomePodDiag.ps1 -Name "Küche"
+
+    .\AppleHomePodDiag.ps1 -IP "192.168.2.67"
+
+    .\AppleHomePodDiag.ps1 -MAC "50-BC-96-03-A8-54"
+
     .\AppleHomePodDiag.ps1 -Compare ".\AP1.json", ".\AP2.json"
 #>
 
@@ -60,6 +66,18 @@ param(
     [Parameter(ParameterSetName = 'Scan')]
     [string]$ReferenceJson,
 
+    # Focused diagnostic mode. Use exactly one of -Name, -IP or -MAC.
+    # The script still takes one Bonjour snapshot so model/OS/TXT data can be
+    # correlated, but only the requested device is fully tested and displayed.
+    [Parameter(ParameterSetName = 'Scan')]
+    [string]$Name,
+
+    [Parameter(ParameterSetName = 'Scan')]
+    [string]$IP,
+
+    [Parameter(ParameterSetName = 'Scan')]
+    [string]$MAC,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Compare')]
     [ValidateCount(2, 20)]
     [string[]]$Compare
@@ -69,7 +87,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $Script:ToolName = 'AppleHomePodDiag'
-$Script:ToolVersion = '1.0.2'
+$Script:ToolVersion = '1.1.0'
 $Script:ProjectUrl = 'https://github.com/Skittel/AppleHomePodDiag'
 $Script:AppleUpdateUrl = 'https://support.apple.com/en-us/108045'
 
@@ -771,6 +789,77 @@ function Test-PingAddress {
     }
 }
 
+
+function Normalize-MacAddress {
+    param([AllowNull()][string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address)) {
+        return $null
+    }
+
+    $hex = ($Address -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+
+    if ($hex.Length -ne 12) {
+        return $null
+    }
+
+    return (($hex -split '(.{2})' | Where-Object { $_ }) -join '-')
+}
+
+function Get-IPAddressForMac {
+    param([Parameter(Mandatory = $true)][string]$MacAddress)
+
+    $wanted = Normalize-MacAddress $MacAddress
+    if (-not $wanted) {
+        return $null
+    }
+
+    try {
+        $neighbor = Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop |
+            Where-Object {
+                $_.LinkLayerAddress -and
+                (Normalize-MacAddress $_.LinkLayerAddress) -eq $wanted -and
+                $_.State -ne 'Unreachable'
+            } |
+            Select-Object -First 1
+
+        if ($neighbor) {
+            return [string]$neighbor.IPAddress
+        }
+    }
+    catch {}
+
+    try {
+        $raw = (& arp -a 2>&1 | Out-String)
+
+        foreach ($line in ($raw -split "`r?`n")) {
+            if ($line -match '^\s*((?:\d{1,3}\.){3}\d{1,3})\s+([0-9A-Fa-f:-]{17})\s+') {
+                if ((Normalize-MacAddress $matches[2]) -eq $wanted) {
+                    return $matches[1]
+                }
+            }
+        }
+    }
+    catch {}
+
+    return $null
+}
+
+function Test-IPv4String {
+    param([AllowNull()][string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address)) {
+        return $false
+    }
+
+    $parsed = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed)) {
+        return $false
+    }
+
+    return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+}
+
 function Get-NeighborMac {
     param([AllowNull()][string]$IPAddress)
 
@@ -1203,6 +1292,40 @@ if ($PSCmdlet.ParameterSetName -eq 'Compare') {
 # Scan mode
 # -----------------------------------------------------------------------------
 
+$focusParameterCount = @(
+    @($Name, $IP, $MAC) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+).Count
+
+if ($focusParameterCount -gt 1) {
+    throw 'Use only one focused diagnostic selector at a time: -Name, -IP or -MAC.'
+}
+
+if ($IP -and -not (Test-IPv4String $IP)) {
+    throw "Invalid IPv4 address supplied to -IP: $IP"
+}
+
+if ($MAC -and -not (Normalize-MacAddress $MAC)) {
+    throw "Invalid MAC address supplied to -MAC: $MAC"
+}
+
+$focusedMode = $focusParameterCount -eq 1
+$focusedSelector = $null
+$focusedValue = $null
+
+if ($Name) {
+    $focusedSelector = 'Name'
+    $focusedValue = $Name
+}
+elseif ($IP) {
+    $focusedSelector = 'IP'
+    $focusedValue = $IP
+}
+elseif ($MAC) {
+    $focusedSelector = 'MAC'
+    $focusedValue = Normalize-MacAddress $MAC
+}
+
 $dnsSd = Get-DnsSdPath
 
 if (-not (Test-Path -LiteralPath $OutputDirectory)) {
@@ -1218,6 +1341,10 @@ Write-Host ('=' * 86) -ForegroundColor DarkGray
 Write-Host "Node:            $NodeName"
 Write-Host "dns-sd.exe:      $dnsSd"
 Write-Host "Discovery time:  $ScanSeconds seconds"
+
+if ($focusedMode) {
+    Write-Host ("Focused target:  {0} = {1}" -f $focusedSelector, $focusedValue) -ForegroundColor Yellow
+}
 
 if ($ReferenceJson) {
     Write-Host "Reference JSON:  $ReferenceJson"
@@ -1259,7 +1386,96 @@ if ($instances.Count -eq 0 -and $zoneDetails.Count -gt 0) {
     $instances = @($zoneDetails.Keys)
 }
 
-if ($instances.Count -eq 0) {
+# Focused mode narrows the full Bonjour snapshot down to one device. For -IP
+# and -MAC we correlate the selector with Bonjour records first. If correlation
+# is impossible, a direct IP-only diagnostic result is created later.
+$focusedDirectIP = $null
+$focusedMatchedInstance = $null
+
+if ($focusedMode) {
+    if ($focusedSelector -eq 'Name') {
+        $focusedMatchedInstance = @(
+            $instances | Where-Object { $_ -eq $focusedValue }
+        ) | Select-Object -First 1
+    }
+    elseif ($focusedSelector -eq 'IP') {
+        $focusedDirectIP = $focusedValue
+
+        foreach ($candidateName in $instances) {
+            $candidateDetail = $null
+
+            if ($zoneDetails.ContainsKey($candidateName)) {
+                $candidateDetail = $zoneDetails[$candidateName]
+            }
+
+            if ($null -eq $candidateDetail -or -not $candidateDetail.HostName) {
+                $candidateDetail = Get-AirPlayDetails -DnsSd $dnsSd -InstanceName $candidateName
+            }
+
+            if ($candidateDetail.HostName) {
+                $candidateIP = Resolve-MdnsIPv4 -DnsSd $dnsSd -HostName $candidateDetail.HostName
+
+                if ($candidateIP -eq $focusedValue) {
+                    $focusedMatchedInstance = $candidateName
+                    break
+                }
+            }
+        }
+    }
+    elseif ($focusedSelector -eq 'MAC') {
+        $wantedMac = Normalize-MacAddress $focusedValue
+        $focusedDirectIP = Get-IPAddressForMac -MacAddress $wantedMac
+
+        # First try AirPlay deviceid because it is available without touching
+        # every device. It may or may not be the WLAN MAC, so neighbor MAC is
+        # checked as a fallback.
+        foreach ($candidateName in $instances) {
+            $candidateDetail = $null
+
+            if ($zoneDetails.ContainsKey($candidateName)) {
+                $candidateDetail = $zoneDetails[$candidateName]
+            }
+
+            if ($null -eq $candidateDetail -or $candidateDetail.TXT.Count -eq 0) {
+                $candidateDetail = Get-AirPlayDetails -DnsSd $dnsSd -InstanceName $candidateName
+            }
+
+            if ($candidateDetail.TXT.Contains('deviceid')) {
+                $candidateDeviceId = Normalize-MacAddress ([string]$candidateDetail.TXT['deviceid'])
+
+                if ($candidateDeviceId -eq $wantedMac) {
+                    $focusedMatchedInstance = $candidateName
+                    break
+                }
+            }
+
+            if ($candidateDetail.HostName) {
+                $candidateIP = Resolve-MdnsIPv4 -DnsSd $dnsSd -HostName $candidateDetail.HostName
+
+                if ($candidateIP) {
+                    # Populate/refresh the neighbor table before asking for MAC.
+                    [void](Test-PingAddress $candidateIP)
+                    $candidateMac = Normalize-MacAddress (Get-NeighborMac $candidateIP)
+
+                    if ($candidateMac -eq $wantedMac) {
+                        $focusedMatchedInstance = $candidateName
+                        $focusedDirectIP = $candidateIP
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    if ($focusedMatchedInstance) {
+        $instances = @($focusedMatchedInstance)
+    }
+    else {
+        $instances = @()
+    }
+}
+
+if ($instances.Count -eq 0 -and -not $focusedMode) {
     Write-Warning 'No _airplay._tcp services were discovered. This is itself an important diagnostic result.'
 }
 
@@ -1340,6 +1556,58 @@ foreach ($instance in $instances) {
     $devices.Add($device)
 }
 
+# If focused lookup by IP/MAC could not be correlated with Bonjour, still run
+# the direct network checks. Model/OS/TXT data remain unknown because they are
+# Bonjour metadata, but the result clearly shows whether IP connectivity works.
+if ($focusedMode -and $devices.Count -eq 0) {
+    if ($focusedSelector -eq 'Name') {
+        Write-Warning ("The AirPlay/Bonjour name '{0}' was not discovered in this scan." -f $focusedValue)
+    }
+    else {
+        if (-not $focusedDirectIP -and $focusedSelector -eq 'MAC') {
+            $focusedDirectIP = Get-IPAddressForMac -MacAddress $focusedValue
+        }
+
+        if ($focusedDirectIP) {
+            $ping = Test-PingAddress $focusedDirectIP
+            $neighborMac = Get-NeighborMac $focusedDirectIP
+            $tcp = Test-TcpPort -IPAddress $focusedDirectIP -Port 7000
+
+            $directName = if ($focusedSelector -eq 'MAC') {
+                "MAC $focusedValue"
+            } else {
+                "IP $focusedDirectIP"
+            }
+
+            $device = New-DeviceResult `
+                -Name $directName `
+                -Model $null `
+                -HostName $null `
+                -IPv4 $focusedDirectIP `
+                -MAC $(if ($neighborMac) { $neighborMac } elseif ($focusedSelector -eq 'MAC') { $focusedValue } else { $null }) `
+                -DeviceId $null `
+                -BluetoothAddress $null `
+                -OSVersion $null `
+                -SrcVersion $null `
+                -Port 7000 `
+                -MdnsDiscovered $false `
+                -MdnsResolved $false `
+                -PingOK ([bool]$ping.Success) `
+                -PingMs $ping.Ms `
+                -TcpOK ([bool]$tcp) `
+                -DnsSdInterfaceIndex $null `
+                -CurrentHomePodVersion $currentVersion.Version `
+                -DiscoverySource 'Direct focused diagnostic; no Bonjour correlation' `
+                -TxtRecords $null
+
+            $devices.Add($device)
+        }
+        else {
+            Write-Warning ("The requested MAC address {0} could not be mapped to an IPv4 address." -f $focusedValue)
+        }
+    }
+}
+
 Write-Progress -Activity 'Inspecting AirPlay devices' -Completed
 
 if ($ReferenceJson) {
@@ -1373,6 +1641,9 @@ $metadata = [pscustomobject]@{
     DnsSdPath             = $dnsSd
     ScanSeconds           = $ScanSeconds
     ReferenceJson         = $ReferenceJson
+    FocusedMode           = $focusedMode
+    FocusedSelector       = $focusedSelector
+    FocusedValue          = $focusedValue
 }
 
 Write-Section 'Results'
@@ -1400,6 +1671,41 @@ $display = @(
 
 if ($display.Count -gt 0) {
     $display | Format-Table -AutoSize
+
+    if ($focusedMode -and $deviceArray.Count -eq 1) {
+        Write-Section 'Focused device details'
+
+        $deviceArray[0] |
+            Select-Object `
+                Name,
+                Type,
+                Model,
+                HostName,
+                IPv4,
+                MAC,
+                DeviceId,
+                BluetoothAddress,
+                OSVersion,
+                CurrentHomePodVersion,
+                VersionStatus,
+                SrcVersion,
+                Port,
+                MdnsDiscovered,
+                MdnsResolved,
+                PingOK,
+                PingMs,
+                TcpOK,
+                DnsSdInterfaceIndex,
+                DiscoverySource |
+            Format-List
+
+        if ($deviceArray[0].TxtRecords) {
+            Write-Host 'Bonjour TXT records:' -ForegroundColor Cyan
+            $deviceArray[0].TxtRecords.GetEnumerator() |
+                Sort-Object Name |
+                Format-Table Name, Value -AutoSize
+        }
+    }
 }
 else {
     Write-Host 'No matching devices found.' -ForegroundColor Yellow
