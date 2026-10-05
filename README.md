@@ -10,6 +10,8 @@ The tool is especially useful in Wi-Fi environments with multiple access points,
 2.4 GHz / 5 GHz / 6 GHz networks, multicast filtering, IGMP snooping or other
 network infrastructure that may affect Bonjour/mDNS traffic.
 
+This tool has been created with the help of chatgpt.
+
 ## Features
 
 AppleHomePodDiag can:
