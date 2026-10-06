@@ -87,7 +87,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $Script:ToolName = 'AppleHomePodDiag'
-$Script:ToolVersion = '1.1.0'
+$Script:ToolVersion = '1.1.2'
 $Script:ProjectUrl = 'https://github.com/Skittel/AppleHomePodDiag'
 $Script:AppleUpdateUrl = 'https://support.apple.com/en-us/108045'
 
@@ -754,41 +754,134 @@ function Resolve-MdnsIPv4 {
 }
 
 function Test-PingAddress {
-    param([AllowNull()][string]$IPAddress)
+    param(
+        [AllowNull()][string]$IPAddress,
+        [ValidateRange(100, 5000)][int]$TimeoutMs = 1000
+    )
 
     if ([string]::IsNullOrWhiteSpace($IPAddress)) {
         return [pscustomobject]@{
             Success = $false
             Ms      = $null
+            MinMs   = $null
+            MaxMs   = $null
+            AvgMs   = $null
+            Lost    = 3
+            Sent    = 3
+            Samples = @()
         }
     }
+
+    $pingClient = New-Object System.Net.NetworkInformation.Ping
+    $samples = New-Object 'System.Collections.Generic.List[int]'
+    $lost = 0
 
     try {
-        $reply = Test-Connection -ComputerName $IPAddress -Count 1 -ErrorAction Stop |
-            Select-Object -First 1
-
-        $responseMs = $null
-
-        if ($reply.PSObject.Properties.Name -contains 'ResponseTime') {
-            $responseMs = [int]$reply.ResponseTime
+        # Warm-up / wake-up ping. Its result is deliberately discarded.
+        # Wi-Fi power-saving clients such as HomePods can show a high first
+        # response time while waking up. It should not distort the measurement.
+        try {
+            [void]$pingClient.Send($IPAddress, $TimeoutMs)
         }
-        elseif ($reply.PSObject.Properties.Name -contains 'Latency') {
-            $responseMs = [int]$reply.Latency
-        }
+        catch {}
 
-        return [pscustomobject]@{
-            Success = $true
-            Ms      = $responseMs
+        # Three measured pings.
+        for ($i = 0; $i -lt 3; $i++) {
+            try {
+                $reply = $pingClient.Send($IPAddress, $TimeoutMs)
+
+                if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                    $samples.Add([int]$reply.RoundtripTime)
+                }
+                else {
+                    $lost++
+                }
+            }
+            catch {
+                $lost++
+            }
         }
     }
-    catch {
+    finally {
+        try { $pingClient.Dispose() } catch {}
+    }
+
+    if ($samples.Count -eq 0) {
         return [pscustomobject]@{
             Success = $false
             Ms      = $null
+            MinMs   = $null
+            MaxMs   = $null
+            AvgMs   = $null
+            Lost    = $lost
+            Sent    = 3
+            Samples = @()
         }
+    }
+
+    $values = $samples.ToArray()
+    $min = ($values | Measure-Object -Minimum).Minimum
+    $max = ($values | Measure-Object -Maximum).Maximum
+    $avg = [int][math]::Round(($values | Measure-Object -Average).Average)
+
+    return [pscustomobject]@{
+        Success = $true
+        # Keep Ms for backwards compatibility with older reports/code.
+        Ms      = $avg
+        MinMs   = [int]$min
+        MaxMs   = [int]$max
+        AvgMs   = [int]$avg
+        Lost    = $lost
+        Sent    = 3
+        Samples = @($values)
     }
 }
 
+function Get-PingDisplay {
+    param([Parameter(Mandatory = $true)]$Object)
+
+    if (-not $Object.PingOK) {
+        return 'NO REPLY'
+    }
+
+    $min = $null
+    $max = $null
+    $lost = 0
+
+    if ($Object.PSObject.Properties.Name -contains 'PingMinMs') {
+        $min = $Object.PingMinMs
+    }
+
+    if ($Object.PSObject.Properties.Name -contains 'PingMaxMs') {
+        $max = $Object.PingMaxMs
+    }
+
+    if ($Object.PSObject.Properties.Name -contains 'PingLost' -and $null -ne $Object.PingLost) {
+        $lost = [int]$Object.PingLost
+    }
+
+    if ($null -ne $min -and $null -ne $max) {
+        $text = if ([int]$min -eq [int]$max) {
+            "{0}ms" -f $min
+        }
+        else {
+            "{0}-{1}ms" -f $min, $max
+        }
+
+        if ($lost -gt 0) {
+            $text += " / $lost lost"
+        }
+
+        return $text
+    }
+
+    # Backwards compatibility when comparing old JSON reports.
+    if ($Object.PSObject.Properties.Name -contains 'PingMs' -and $null -ne $Object.PingMs) {
+        return ("{0}ms" -f $Object.PingMs)
+    }
+
+    return 'OK'
+}
 
 function Normalize-MacAddress {
     param([AllowNull()][string]$Address)
@@ -964,6 +1057,12 @@ function New-DeviceResult {
         [bool]$MdnsResolved,
         [bool]$PingOK,
         [AllowNull()][Nullable[int]]$PingMs,
+        [AllowNull()][Nullable[int]]$PingMinMs,
+        [AllowNull()][Nullable[int]]$PingMaxMs,
+        [AllowNull()][Nullable[int]]$PingAvgMs,
+        [int]$PingLost = 0,
+        [int]$PingSent = 3,
+        [AllowNull()][int[]]$PingSamples,
         [bool]$TcpOK,
         [AllowNull()][Nullable[int]]$DnsSdInterfaceIndex,
         [AllowNull()][string]$CurrentHomePodVersion,
@@ -992,6 +1091,12 @@ function New-DeviceResult {
         MdnsResolved          = $MdnsResolved
         PingOK                = $PingOK
         PingMs                = $PingMs
+        PingMinMs             = $PingMinMs
+        PingMaxMs             = $PingMaxMs
+        PingAvgMs             = $PingAvgMs
+        PingLost              = $PingLost
+        PingSent              = $PingSent
+        PingSamples           = $PingSamples
         TcpOK                 = $TcpOK
         DnsSdInterfaceIndex   = $DnsSdInterfaceIndex
         DiscoverySource       = $DiscoverySource
@@ -1065,6 +1170,12 @@ function Add-ReferenceOnlyDevices {
             -MdnsResolved $false `
             -PingOK ([bool]$ping.Success) `
             -PingMs $ping.Ms `
+            -PingMinMs $ping.MinMs `
+            -PingMaxMs $ping.MaxMs `
+            -PingAvgMs $ping.AvgMs `
+            -PingLost $ping.Lost `
+            -PingSent $ping.Sent `
+            -PingSamples $ping.Samples `
             -TcpOK ([bool]$tcp) `
             -DnsSdInterfaceIndex $null `
             -CurrentHomePodVersion $CurrentHomePodVersion `
@@ -1090,32 +1201,41 @@ function Convert-ToHtmlReport {
         return [System.Web.HttpUtility]::HtmlEncode([string]$Value)
     }
 
-    $rows = foreach ($device in $Devices) {
-        $class = 'ok'
+    function New-HtmlRows {
+        param([array]$Items)
 
-        if (-not $device.MdnsDiscovered -or -not $device.PingOK -or -not $device.TcpOK) {
-            $class = 'bad'
-        }
-        elseif ($device.VersionStatus -eq 'UPDATE AVAILABLE') {
-            $class = 'warn'
-        }
+        $rows = foreach ($device in ($Items | Sort-Object Type, Name)) {
+            $class = 'ok'
 
-        @"
+            if (-not $device.MdnsDiscovered -or -not $device.PingOK -or -not $device.TcpOK) {
+                $class = 'bad'
+            }
+            elseif ($device.VersionStatus -eq 'UPDATE AVAILABLE') {
+                $class = 'warn'
+            }
+
+            @"
 <tr class="$class">
-<td>$(ConvertTo-HtmlEncoded $device.Name)</td>
 <td>$(ConvertTo-HtmlEncoded $device.Type)</td>
+<td>$(ConvertTo-HtmlEncoded $device.Name)</td>
 <td>$(ConvertTo-HtmlEncoded $device.IPv4)</td>
 <td>$(ConvertTo-HtmlEncoded $device.MAC)</td>
 <td>$(ConvertTo-HtmlEncoded $device.OSVersion)</td>
 <td>$(ConvertTo-HtmlEncoded $device.VersionStatus)</td>
 <td>$(ConvertTo-HtmlEncoded $device.MdnsDiscovered)</td>
 <td>$(ConvertTo-HtmlEncoded $device.MdnsResolved)</td>
-<td>$(ConvertTo-HtmlEncoded $(if ($device.PingOK) { if ($null -ne $device.PingMs) { "$($device.PingMs) ms" } else { 'OK' } } else { 'FAIL' }))</td>
+<td>$(ConvertTo-HtmlEncoded $(Get-PingDisplay $device))</td>
 <td>$(ConvertTo-HtmlEncoded $(if ($device.TcpOK) { "OK:$($device.Port)" } else { "FAIL:$($device.Port)" }))</td>
 <td>$(ConvertTo-HtmlEncoded $device.DiscoverySource)</td>
 </tr>
 "@
+        }
+
+        return ($rows -join "`n")
     }
+
+    $homePodRows = New-HtmlRows @($Devices | Where-Object { $_.IsHomePod })
+    $otherRows   = New-HtmlRows @($Devices | Where-Object { -not $_.IsHomePod })
 
     $html = @"
 <!doctype html>
@@ -1150,16 +1270,29 @@ code{background:#f4f4f4;padding:1px 4px}
 <tr><th>Reference report</th><td>$(ConvertTo-HtmlEncoded $Metadata.ReferenceJson)</td></tr>
 </table>
 
-<h2>AirPlay devices</h2>
+<h2>AirPlay devices - HomePods</h2>
 <table>
 <thead>
 <tr>
-<th>Name</th><th>Type</th><th>IPv4</th><th>MAC</th><th>OS</th><th>Firmware</th>
+<th>Type</th><th>Name</th><th>IPv4</th><th>MAC</th><th>OS</th><th>Firmware</th>
 <th>mDNS found</th><th>.local resolved</th><th>Ping</th><th>AirPlay TCP</th><th>Source</th>
 </tr>
 </thead>
 <tbody>
-$($rows -join "`n")
+$homePodRows
+</tbody>
+</table>
+
+<h2>AirPlay devices - Other devices</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th><th>Name</th><th>IPv4</th><th>MAC</th><th>OS</th><th>Firmware</th>
+<th>mDNS found</th><th>.local resolved</th><th>Ping</th><th>AirPlay TCP</th><th>Source</th>
+</tr>
+</thead>
+<tbody>
+$otherRows
 </tbody>
 </table>
 
@@ -1236,9 +1369,7 @@ function Invoke-CompareReports {
                     BSSID         = [string]$report.Metadata.WLAN.BSSID
                     MdnsDiscovered = if ($match.MdnsDiscovered) { 'YES' } else { 'NO' }
                     IPv4          = [string]$match.IPv4
-                    Ping          = if ($match.PingOK) {
-                                        if ($null -ne $match.PingMs) { "$($match.PingMs) ms" } else { 'OK' }
-                                    } else { 'FAIL' }
+                    Ping          = Get-PingDisplay $match
                     AirPlayTcp    = if ($match.TcpOK) { "OK:$($match.Port)" } else { "FAIL:$($match.Port)" }
                     OS            = [string]$match.OSVersion
                     Firmware      = [string]$match.VersionStatus
@@ -1547,6 +1678,12 @@ foreach ($instance in $instances) {
         -MdnsResolved ([bool]$ip) `
         -PingOK ([bool]$ping.Success) `
         -PingMs $ping.Ms `
+        -PingMinMs $ping.MinMs `
+        -PingMaxMs $ping.MaxMs `
+        -PingAvgMs $ping.AvgMs `
+        -PingLost $ping.Lost `
+        -PingSent $ping.Sent `
+        -PingSamples $ping.Samples `
         -TcpOK ([bool]$tcp) `
         -DnsSdInterfaceIndex $detail.InterfaceIndex `
         -CurrentHomePodVersion $currentVersion.Version `
@@ -1594,6 +1731,12 @@ if ($focusedMode -and $devices.Count -eq 0) {
                 -MdnsResolved $false `
                 -PingOK ([bool]$ping.Success) `
                 -PingMs $ping.Ms `
+                -PingMinMs $ping.MinMs `
+                -PingMaxMs $ping.MaxMs `
+                -PingAvgMs $ping.AvgMs `
+                -PingLost $ping.Lost `
+                -PingSent $ping.Sent `
+                -PingSamples $ping.Samples `
                 -TcpOK ([bool]$tcp) `
                 -DnsSdInterfaceIndex $null `
                 -CurrentHomePodVersion $currentVersion.Version `
@@ -1648,29 +1791,53 @@ $metadata = [pscustomobject]@{
 
 Write-Section 'Results'
 
-$display = @(
-    $deviceArray |
-        Sort-Object @{ Expression = 'IsHomePod'; Descending = $true }, Name |
+function Show-DeviceTable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][array]$Items
+    )
+
+    Write-Host ''
+    Write-Host $Title -ForegroundColor Cyan
+    Write-Host ('-' * $Title.Length) -ForegroundColor DarkGray
+
+    if ($Items.Count -eq 0) {
+        Write-Host 'No devices found.' -ForegroundColor DarkGray
+        return
+    }
+
+    $Items |
+        Sort-Object Type, Name |
         Select-Object `
-            Name,
             Type,
+            Name,
             IPv4,
             MAC,
             OSVersion,
             VersionStatus,
             @{ Name = 'mDNS'; Expression = { if ($_.MdnsDiscovered) { 'YES' } else { 'NO' } } },
-            @{ Name = 'Ping'; Expression = {
-                if ($_.PingOK) {
-                    if ($null -ne $_.PingMs) { "$($_.PingMs)ms" } else { 'OK' }
-                } else { 'NO REPLY' }
-            }},
+            @{ Name = 'Ping'; Expression = { Get-PingDisplay $_ } },
             @{ Name = 'TCP'; Expression = {
                 if ($_.TcpOK) { "OK:$($_.Port)" } else { "FAIL:$($_.Port)" }
-            }}
+            }} |
+        Format-Table -AutoSize
+}
+
+$homePodDevices = @(
+    $deviceArray |
+        Where-Object { $_.IsHomePod } |
+        Sort-Object Type, Name
 )
 
-if ($display.Count -gt 0) {
-    $display | Format-Table -AutoSize
+$otherAirPlayDevices = @(
+    $deviceArray |
+        Where-Object { -not $_.IsHomePod } |
+        Sort-Object Type, Name
+)
+
+if ($deviceArray.Count -gt 0) {
+    Show-DeviceTable -Title 'AirPlay devices - HomePods' -Items $homePodDevices
+    Show-DeviceTable -Title 'AirPlay devices - Other devices' -Items $otherAirPlayDevices
 
     if ($focusedMode -and $deviceArray.Count -eq 1) {
         Write-Section 'Focused device details'
@@ -1693,7 +1860,12 @@ if ($display.Count -gt 0) {
                 MdnsDiscovered,
                 MdnsResolved,
                 PingOK,
-                PingMs,
+                PingMinMs,
+                PingMaxMs,
+                PingAvgMs,
+                PingLost,
+                PingSent,
+                PingSamples,
                 TcpOK,
                 DnsSdInterfaceIndex,
                 DiscoverySource |
@@ -1729,6 +1901,7 @@ $report |
     Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
 $deviceArray |
+    Sort-Object Type, Name |
     Export-Csv -LiteralPath $csvPath -Delimiter ';' -NoTypeInformation -Encoding UTF8
 
 try {
@@ -1746,6 +1919,7 @@ $updates = @($homePods | Where-Object { $_.VersionStatus -eq 'UPDATE AVAILABLE' 
 $notDiscovered = @($deviceArray | Where-Object { -not $_.MdnsDiscovered })
 $resolvedFailures = @($deviceArray | Where-Object { $_.MdnsDiscovered -and -not $_.MdnsResolved })
 $pingFailures = @($deviceArray | Where-Object { $_.IPv4 -and -not $_.PingOK })
+$pingLossDevices = @($deviceArray | Where-Object { $_.IPv4 -and $_.PingOK -and $_.PingLost -gt 0 })
 $tcpFailures = @($deviceArray | Where-Object { $_.IPv4 -and -not $_.TcpOK })
 
 Write-Host ("AirPlay records/devices:      {0}" -f $deviceArray.Count)
@@ -1754,6 +1928,7 @@ Write-Host ("HomePods with update:         {0}" -f $updates.Count)
 Write-Host ("Missing from mDNS (reference):{0}" -f $notDiscovered.Count)
 Write-Host (".local resolution failures:   {0}" -f $resolvedFailures.Count)
 Write-Host ("Ping failures:                {0}" -f $pingFailures.Count)
+Write-Host ("Ping partial loss:            {0}" -f $pingLossDevices.Count)
 Write-Host ("AirPlay TCP failures:         {0}" -f $tcpFailures.Count)
 
 if ($notDiscovered.Count -gt 0) {
