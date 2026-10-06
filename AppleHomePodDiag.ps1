@@ -1,4 +1,6 @@
-# Copyright (c) 2026 Stefan Kittel <info@kittel.online> - https://github.com/Skittel/AppleHomePodDiag
+# AppleHomePodDiag 1.1.3
+# Copyright (c) 2026 Stefan Kittel <info@kittel.online>
+# Project: https://github.com/Skittel/AppleHomePodDiag
 #requires -Version 5.1
 <#
 .SYNOPSIS
@@ -23,6 +25,11 @@
     See LICENSE and PROJECT_INFO.txt in the original project.
     Redistributed or modified versions are subject to the license terms,
     including the requirement to retain PROJECT_INFO.txt.
+
+.NOTES
+    Version: 1.1.3
+    Author: Stefan Kittel
+    Project: https://github.com/Skittel/AppleHomePodDiag
 
 .EXAMPLES
     .\AppleHomePodDiag.ps1
@@ -87,7 +94,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $Script:ToolName = 'AppleHomePodDiag'
-$Script:ToolVersion = '1.1.2'
+$Script:ToolVersion = '1.1.3'
 $Script:ProjectUrl = 'https://github.com/Skittel/AppleHomePodDiag'
 $Script:AppleUpdateUrl = 'https://support.apple.com/en-us/108045'
 
@@ -759,6 +766,9 @@ function Test-PingAddress {
         [ValidateRange(100, 5000)][int]$TimeoutMs = 1000
     )
 
+    $measuredPingCount = 5
+    $measurementIntervalMs = 500
+
     if ([string]::IsNullOrWhiteSpace($IPAddress)) {
         return [pscustomobject]@{
             Success = $false
@@ -766,8 +776,8 @@ function Test-PingAddress {
             MinMs   = $null
             MaxMs   = $null
             AvgMs   = $null
-            Lost    = 3
-            Sent    = 3
+            Lost    = $measuredPingCount
+            Sent    = $measuredPingCount
             Samples = @()
         }
     }
@@ -779,14 +789,18 @@ function Test-PingAddress {
     try {
         # Warm-up / wake-up ping. Its result is deliberately discarded.
         # Wi-Fi power-saving clients such as HomePods can show a high first
-        # response time while waking up. It should not distort the measurement.
+        # response time while waking up.
         try {
             [void]$pingClient.Send($IPAddress, $TimeoutMs)
         }
         catch {}
 
-        # Three measured pings.
-        for ($i = 0; $i -lt 3; $i++) {
+        # Do not immediately follow the wake-up ping with the measurements.
+        # A 500 ms gap and 500 ms spacing between measured pings makes the test
+        # more representative of intermittent WLAN latency / power-save effects.
+        Start-Sleep -Milliseconds $measurementIntervalMs
+
+        for ($i = 0; $i -lt $measuredPingCount; $i++) {
             try {
                 $reply = $pingClient.Send($IPAddress, $TimeoutMs)
 
@@ -799,6 +813,10 @@ function Test-PingAddress {
             }
             catch {
                 $lost++
+            }
+
+            if ($i -lt ($measuredPingCount - 1)) {
+                Start-Sleep -Milliseconds $measurementIntervalMs
             }
         }
     }
@@ -814,7 +832,7 @@ function Test-PingAddress {
             MaxMs   = $null
             AvgMs   = $null
             Lost    = $lost
-            Sent    = 3
+            Sent    = $measuredPingCount
             Samples = @()
         }
     }
@@ -832,7 +850,7 @@ function Test-PingAddress {
         MaxMs   = [int]$max
         AvgMs   = [int]$avg
         Lost    = $lost
-        Sent    = 3
+        Sent    = $measuredPingCount
         Samples = @($values)
     }
 }
@@ -1061,7 +1079,7 @@ function New-DeviceResult {
         [AllowNull()][Nullable[int]]$PingMaxMs,
         [AllowNull()][Nullable[int]]$PingAvgMs,
         [int]$PingLost = 0,
-        [int]$PingSent = 3,
+        [int]$PingSent = 5,
         [AllowNull()][int[]]$PingSamples,
         [bool]$TcpOK,
         [AllowNull()][Nullable[int]]$DnsSdInterfaceIndex,
